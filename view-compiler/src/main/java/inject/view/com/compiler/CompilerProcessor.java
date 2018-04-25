@@ -1,13 +1,12 @@
 package inject.view.com.compiler;
 
 import com.google.auto.service.AutoService;
-import com.squareup.javapoet.JavaFile;
-import com.squareup.javapoet.MethodSpec;
-import com.squareup.javapoet.TypeName;
-import com.squareup.javapoet.TypeSpec;
 
 import java.io.IOException;
+import java.io.Writer;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 
 import javax.annotation.processing.AbstractProcessor;
@@ -22,6 +21,8 @@ import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.util.Elements;
+import javax.tools.Diagnostic;
+import javax.tools.JavaFileObject;
 
 import inject.view.com.anotation.BindView;
 
@@ -32,12 +33,14 @@ public class CompilerProcessor extends AbstractProcessor {
     private Filer filer;
     private Elements elements;
 
+    private Map<String, AnnotationsInfo> mapClass = new HashMap<>();
+
     @Override
     public synchronized void init(ProcessingEnvironment processingEnvironment) {
         super.init(processingEnvironment);
-        messager=processingEnvironment.getMessager();
-        filer=processingEnvironment.getFiler();
-        elements=processingEnvironment.getElementUtils();
+        messager = processingEnvironment.getMessager();
+        filer = processingEnvironment.getFiler();
+        elements = processingEnvironment.getElementUtils();
     }
 
     @Override
@@ -53,40 +56,60 @@ public class CompilerProcessor extends AbstractProcessor {
     }
 
     @Override
-    public boolean process(Set<? extends TypeElement> set, RoundEnvironment roundEnvironment) {
-        System.out.println("------ process -----");
-
-
-       Set<? extends Element> elements= roundEnvironment.getElementsAnnotatedWith(BindView.class);
-       for(Element element:elements){
-           if(element.getKind()!= ElementKind.FIELD || element.getKind()!=ElementKind.METHOD){
-               return false;
-           }
-           if(element.getKind()==ElementKind.FIELD){
-               VariableElement variableElement=(VariableElement) element;
-               BindView bindView=variableElement.getAnnotation(BindView.class);
-               bindView.value();
-           }
-       }
-
-        MethodSpec methodSpec = MethodSpec.methodBuilder("main")
-                .returns(TypeName.VOID)
-                .addParameter(String[].class, "args")
-                .addStatement("$T.out.println($S)", System.class, "Hello, JavaPoet!")
-                .build();
-
-        TypeSpec typeSpec = TypeSpec.classBuilder("Hello")
-                .addMethod(methodSpec)
-                .build();
-
-        JavaFile javaFile = JavaFile.builder("inject.view.com.compiler", typeSpec).build();
-
-        try {
-            javaFile.writeTo(System.out);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-
+    public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+        messager.printMessage(Diagnostic.Kind.NOTE, "process...");
+        processorBindView(annotations, roundEnv);
         return true;
     }
+
+
+    private void processorBindView(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
+        mapClass.clear();
+        for (Element element : roundEnv.getElementsAnnotatedWith(BindView.class)) {
+            if (element.getKind() != ElementKind.FIELD) {
+                return;
+            }
+            VariableElement variableElement = (VariableElement) element;
+            BindView bindView = variableElement.getAnnotation(BindView.class);
+            int id = bindView.value();
+            TypeElement typeElement = (TypeElement) element.getEnclosingElement();
+            String className = typeElement.getQualifiedName().toString();
+            AnnotationsInfo bindViewClass = mapClass.get(className);
+            if (bindViewClass == null) {
+                bindViewClass = new AnnotationsInfo(elements, typeElement);
+                mapClass.put(className, bindViewClass);
+            }
+            bindViewClass.addVariableElement(variableElement, id);
+        }
+
+        for (String classKey : mapClass.keySet()) {
+            AnnotationsInfo bindViewClass = mapClass.get(classKey);
+            if (bindViewClass != null) {
+                bindViewClass.generateJavaCode();
+
+                try {
+                    JavaFileObject jfo = filer.createSourceFile(
+                            bindViewClass.getProxyClassFullName(),
+                            bindViewClass.getTypeElement());
+                    Writer writer = jfo.openWriter();
+                    writer.write(bindViewClass.generateJavaCode());
+                    writer.flush();
+                    writer.close();
+                } catch (IOException e) {
+                    error(bindViewClass.getTypeElement(),
+                            "Unable to write injector for type %s: %s",
+                            bindViewClass.getTypeElement(), e.getMessage());
+                }
+            }
+        }
+    }
+
+    private void error(Element element, String message, Object... args) {
+        if (args.length > 0) {
+            message = String.format(message, args);
+        }
+        messager.printMessage(Diagnostic.Kind.NOTE, message, element);
+    }
+
+
 }
